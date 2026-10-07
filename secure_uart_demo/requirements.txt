@@ -1,0 +1,6 @@
+# Core cryptography — audited, well-maintained. We do NOT implement primitives.
+cryptography>=42.0
+
+# Optional: only needed if you switch the transport from the simulated UART
+# to a real serial port. The demo runs fully without it.
+# pyserial>=3.5
