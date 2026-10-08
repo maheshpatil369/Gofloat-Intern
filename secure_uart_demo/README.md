@@ -1,59 +1,128 @@
 # Secure UART Demo
 
-A Proof-of-Concept for **secure communication between two embedded-style
-devices** over a UART/serial link: authenticated encryption, replay
-protection, and a defensively-parsed binary packet format.
+Two independent Python processes communicating over an encrypted, authenticated,
+replay-protected binary protocol over a simulated UART link.
 
-> ⚠️ **Status: security research / engineering prototype.**
-> This is **not** a production, safety-critical, or defence-grade system. It is
-> a technically sound PoC meant to be reviewed and challenged by a senior
-> engineer. Do not call it "military grade" or "100% secure" — it is neither.
-> See [What this does *not* protect against](#what-this-does-not-protect-against).
+> ⚠️ **Security research / engineering prototype.**
+> Not production, not safety-critical, not defence-grade.
 
 ---
 
-## The three files to read, in order
-
-| File | What it is |
-|------|------------|
-| **[GUIDANCE.md](GUIDANCE.md)** | Tutorial from first principles, with worked examples. **Start here if you are new to this.** |
-| **[docs/DESIGN.md](docs/DESIGN.md)** | The full engineering spec: architecture, packet format, crypto comparison, threat model, key management, ROS 2, MCU migration. |
-| **[secure_uart.py](secure_uart.py)** | The single, self-contained, runnable implementation + attack tests. |
-
-## Run it
+## Quick start
 
 ```bash
 cd secure_uart_demo
-python3 -m venv .venv && source .venv/bin/activate      # optional
-pip install -r requirements.txt
-python3 secure_uart.py            # full demo + 8 attack tests
-python3 secure_uart.py --quiet    # skip the hex dump
+
+# Terminal 1 — start receiver FIRST (generates the shared key)
+python3 src/device_b.py
+
+# Terminal 2 — start sender
+python3 src/device_a.py
+# type a message and press Enter
 ```
 
-Expected: `TEST 1` is accepted, `TEST 2–9` are all safely rejected, and the
-summary prints `Security tests passed: 8/8`.
+```bash
+# Attack demonstration (self-contained, no devices needed)
+python3 attack_demo.py
 
-## What it demonstrates
-
-```
-DEVICE A  →  serialize  →  AEAD encrypt + authenticate  →  packetize  →  UART
-DEVICE B  →  parse  →  validate  →  anti-replay  →  verify + decrypt  →  app
+# All unit tests
+python3 -m pytest tests/ -v
 ```
 
-- **Confidentiality + Integrity + Authentication** in one step via an AEAD
-  (ChaCha20-Poly1305, RFC 8439; AES-256-GCM also selectable).
-- **Replay protection** via a monotonic sequence counter and a sliding window.
-- **Deterministic nonces** derived from `(sender_id, sequence)` so a nonce is
-  never reused — the one unforgivable mistake with AEAD.
-- **Defensive packet parsing** that never crashes on hostile input.
-- An **attack suite** (tamper / replay / wrong-key / malformed / nonce-reuse)
-  that proves each control actually fires.
+---
 
-## What this does *not* protect against
+## Project structure
 
-Cryptographic communication is one layer. It does **not** by itself defend
-against: physical device compromise, stolen keys, malicious/compromised
-firmware, side-channel and fault-injection attacks, open debug ports (JTAG/SWD),
-or supply-chain tampering. Those need secure boot, firmware signing, a secure
-element, debug-port lockout, and process controls. See the threat model in
-[docs/DESIGN.md](docs/DESIGN.md).
+```
+src/
+  config.py      protocol constants, key file helpers
+  crypto.py      AeadCipher (ChaCha20-Poly1305 / AES-256-GCM), derive_nonce
+  packet.py      build_packet(), parse_packet(), PacketError
+  replay.py      ReplayWindow (IPsec-style sliding window, RFC 4303)
+  transport.py   SocketClientTransport, SocketServerTransport, UartTransport
+  device_a.py    SENDER — user input → encrypt → transmit
+  device_b.py    RECEIVER — recv → validate → auth → decrypt → display
+
+tests/
+  test_crypto.py   9 tests (encrypt/decrypt, tamper, wrong key, nonce)
+  test_packet.py   9 tests (build/parse, magic, length, CRC)
+  test_replay.py   8 tests (window, duplicate, out-of-order, gap)
+  test_security.py 9 tests (end-to-end: tamper, replay, wrong key, no crash)
+
+docs/
+  ARCHITECTURE.md   layer diagram + Mermaid + block explanations
+  DEMO.md           step-by-step senior-engineer demo script
+  DESIGN.md         full engineering spec (threat model, crypto comparison, etc.)
+  GUIDANCE.md       from-basics tutorial with worked examples
+
+attack_demo.py     7 attack tests: normal, tamper payload, tamper tag,
+                   replay, wrong key, malformed, duplicate seq
+```
+
+---
+
+## What the protocol does
+
+```
+DEVICE A (separate process)           DEVICE B (separate process)
+────────────────────────────          ────────────────────────────
+user types a message
+seq += 1
+nonce = derive(sender_id, seq)        waiting on socket/UART
+AEAD encrypt + 16-byte tag
+build binary packet
+send over socket ─────────────────────────────────────> recv frame
+                                      parse + validate header
+                                      check CRC (accidental errors)
+                                      check seq against replay window
+                                      verify nonce == derive(sender,seq)
+                                      AEAD verify tag + decrypt
+                                      commit replay window
+                                      display plaintext
+```
+
+Device A **never calls decrypt**. Device B **never sees plaintext until after
+the authentication tag verifies**.
+
+---
+
+## Real UART (optional)
+
+```bash
+# Device B on one machine / board
+python3 src/device_b.py --port /dev/ttyUSB1 --baudrate 115200
+
+# Device A on the other
+python3 src/device_a.py --port /dev/ttyUSB0 --baudrate 115200
+```
+
+No protocol code changes — only the transport layer switches.
+
+---
+
+## Algorithm
+
+**Default: ChaCha20-Poly1305 (RFC 8439)** — fast in software, no hardware AES
+required, 16-byte authentication tag, IETF standard. Also selectable:
+AES-256-GCM (NIST SP 800-38D) for MCUs with a hardware AES block.
+
+Crypto is from the audited `cryptography` library. **No hand-rolled primitives.**
+
+---
+
+## Test results
+
+```
+35 passed in 0.08s
+```
+
+All 7 attack tests behave as expected.
+
+---
+
+## What this does NOT protect against
+
+Physical device compromise, stolen keys, unsigned firmware, side-channel
+attacks, debug-port access, supply-chain tampering. Those require secure boot,
+firmware signing, a secure element, and debug-port lockout — documented in
+[docs/DESIGN.md](docs/DESIGN.md) but out of scope for this PoC.
